@@ -74,9 +74,11 @@ The bot implements a simple trading strategy:
 - **take-profit**: Take-profit percentage (e.g., 0.02 means 0.02%)
 - **max-orders**: Maximum concurrent active orders (risk control)
 - **wait-time**: Wait time between orders (prevents overtrading)
+- **wait-time-min / wait-time-max**: Optional random interval bounds; if set, each cycle samples a wait inside the range
 - **grid-step**: Grid step control (prevents close orders from being too dense)
 - **stop-price**: When `direction` is 'buy', exit when price >= stop-price; 'sell' logic is opposite (default: -1, no price-based termination)
 - **pause-price**: When `direction` is 'buy', pause when price >= pause-price; 'sell' logic is opposite (default: -1, no price-based pausing)
+- **max-position-loss**: Maximum percentage drawdown tolerated across open positions before force-closing (default: -1 disabled)
 
 #### Grid Step Feature
 
@@ -108,6 +110,7 @@ Assuming current ETH price is $2000 with take-profit set to 0.02%:
 - **Grid Control**: Ensures reasonable spacing between close orders via `grid-step`
 - **Order Frequency Control**: Controls order timing via `wait-time` to prevent being trapped in short periods
 - **Real-time Monitoring**: Continuously monitors positions and order status
+- **Portfolio Stop-Loss**: Optional global loss limit closes all open positions once the configured drawdown threshold is reached
 - **⚠️ No Stop Loss**: This strategy does not include stop-loss functionality and may face significant losses in adverse market conditions
 
 ## Sample commands:
@@ -206,9 +209,12 @@ python runbot.py --exchange aster --ticker ETH --direction buy --quantity 0.1 --
 - `--env-file`: Account configuration file (default: .env)
 - `--max-orders`: Maximum number of active orders (default: 40)
 - `--wait-time`: Wait time between orders in seconds (default: 450)
+- `--wait-time-min`: Minimum random wait time between orders. Defaults to `--wait-time` when omitted.
+- `--wait-time-max`: Maximum random wait time between orders. Defaults to `--wait-time` when omitted.
 - `--grid-step`: Minimum distance in percentage to the next close order price (default: -100, means no restriction)
 - `--stop-price`: For BUY direction: exit when price >= stop-price. For SELL direction: exit when price <= stop-price. (Default: -1, no price-based termination)
 - `--pause-price`: For BUY direction: pause when price >= pause-price. For SELL direction: pause when price <= pause-price. (Default: -1, no price-based pausing)
+- `--max-position-loss`: Maximum tolerated percentage loss across all open positions before the bot cancels existing take-profit orders and force-closes. (Default: -1, disabled)
 - `--aster-boost`: Enable Boost mode for volume boosting on Aster exchange (only available for aster exchange)
 
 ## Logging

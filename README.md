@@ -78,9 +78,11 @@
 - **take-profit**: 止盈百分比（如 0.02 表示 0.02%）
 - **max-orders**: 最大同时活跃订单数（风险控制）
 - **wait-time**: 订单间等待时间（避免过于频繁交易）
+- **wait-time-min / wait-time-max**: 可选的随机等待区间；若设置则每轮随机抽取等待时间
 - **grid-step**: 网格步长控制（防止平仓订单过于密集）
 - **stop-price**: 当市场价格达到该价格时退出脚本
 - **pause-price**: 当市场价格达到该价格时暂停脚本
+- **max-position-loss**: 可承受的持仓总亏损百分比阈值，超过后强制平仓（默认 -1 关闭）
 
 #### 网格步长功能详解
 
@@ -112,6 +114,7 @@
 - **网格控制**：通过 `grid-step` 确保平仓订单有合理间距
 - **下单频率控制**：通过 `wait-time` 确保下单的时间间隔，防止短时间内被套
 - **实时监控**：持续监控持仓和订单状态
+- **组合止损**：可配置整体亏损阈值，触发后取消止盈单并以吃单方式一次性平掉全部仓位
 - **⚠️ 无止损机制**：此策略不包含止损功能，在不利市场条件下可能面临较大损失
 
 ## 示例命令：
@@ -210,9 +213,12 @@ python runbot.py --exchange aster --ticker ETH --direction buy --quantity 0.1 --
 - `--env-file`: 账户配置文件 (默认：.env)
 - `--max-orders`: 最大活跃订单数（默认：40）
 - `--wait-time`: 订单间等待时间（秒）（默认：450）
+- `--wait-time-min`: 随机等待时间的下限，不填则使用 `--wait-time`
+- `--wait-time-max`: 随机等待时间的上限，不填则使用 `--wait-time`
 - `--grid-step`: 与下一个平仓订单价格的最小距离百分比（默认：-100，表示无限制）
 - `--stop-price`: 当 `direction` 是 'buy' 时，price >= stop-price 停止交易并退出程序；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易）
 - `--pause-price`: 当 `direction` 是 'buy' 时，price >= pause-price 停止交易并退出程序；'sell' 逻辑相反（默认：-1，表示不会因为价格原因停止交易）
+- `--max-position-loss`: 最大可承受的总仓位亏损百分比，达到阈值后取消对应止盈单并以吃单方式强制平仓。（默认：-1，关闭）
 - `--aster-boost`: 启用 Aster 交易所的 Boost 模式进行交易量提升（仅适用于 aster 交易所）
   `--aster-boost` 的下单逻辑：下 maker 单开仓，成交后立即用 taker 单关仓，以此循环。磨损为一单 maker，一单 taker 的手续费，以及滑点。
 

@@ -3,6 +3,7 @@ EdgeX exchange client implementation.
 """
 
 import os
+import ast
 import asyncio
 import json
 import traceback
@@ -58,7 +59,15 @@ class EdgeXClient(BaseExchangeClient):
 
     async def connect(self) -> None:
         """Connect to EdgeX WebSocket."""
-        self.ws_manager.connect_private()
+        try:
+            self.ws_manager.connect_private()
+        except ValueError as e:
+            error_text = str(e)
+            body_text = self._extract_ws_error_body(error_text)
+            if body_text is not None:
+                self.logger.log(f"EdgeX WebSocket handshake body: {body_text}", "ERROR")
+            raise
+
         # Wait a moment for connection to establish
         await asyncio.sleep(2)
 
@@ -141,6 +150,34 @@ class EdgeXClient(BaseExchangeClient):
             private_client.on_message("trade-event", order_update_handler)
         except Exception as e:
             self.logger.log(f"Could not add trade-event handler: {e}", "ERROR")
+
+    @staticmethod
+    def _extract_ws_error_body(error_text: str) -> Optional[str]:
+        """Attempt to extract and decode response body from websocket error string."""
+        if not error_text:
+            return None
+
+        if "-+-+-" not in error_text:
+            return None
+
+        try:
+            raw_body = error_text.split("-+-+-")[-1].strip()
+            if not raw_body:
+                return "<empty>"
+
+            if raw_body.startswith("b\"") or raw_body.startswith("b'"):
+                try:
+                    body_bytes = ast.literal_eval(raw_body)
+                    if isinstance(body_bytes, (bytes, bytearray)):
+                        if body_bytes:
+                            return body_bytes.decode("utf-8", errors="replace")
+                        return "<empty>"
+                except Exception:
+                    pass
+
+            return raw_body
+        except Exception:
+            return None
 
     @query_retry(default_return=(0, 0))
     async def fetch_bbo_prices(self, contract_id: str) -> Tuple[Decimal, Decimal]:

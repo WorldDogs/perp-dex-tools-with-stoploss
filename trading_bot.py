@@ -4,11 +4,12 @@ Modular Trading Bot - Supports multiple exchanges
 
 import os
 import time
+import random
 import asyncio
 import traceback
-from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from typing import Dict, Optional
 
 from exchanges import ExchangeFactory
 from helpers import TradingLogger
@@ -31,6 +32,9 @@ class TradingConfig:
     stop_price: Decimal
     pause_price: Decimal
     aster_boost: bool
+    max_position_loss: Decimal = field(default=Decimal(-1))
+    wait_time_min: Optional[int] = None
+    wait_time_max: Optional[int] = None
 
     @property
     def close_order_side(self) -> str:
@@ -80,6 +84,8 @@ class TradingBot:
         self.order_canceled_event = asyncio.Event()
         self.shutdown_requested = False
         self.loop = None
+        self.open_trades: Dict[str, Dict[str, Decimal]] = {}
+        self.current_wait_target = self._select_wait_interval(Decimal(max(self.config.wait_time, 0)))
 
         # Register order callback
         self._setup_websocket_handlers()
@@ -110,7 +116,9 @@ class TradingBot:
                 status = message.get('status')
                 side = message.get('side', '')
                 order_type = message.get('order_type', '')
-                filled_size = Decimal(message.get('filled_size'))
+                size = self._safe_decimal(message.get('size'))
+                price = self._safe_decimal(message.get('price'))
+                filled_size = self._safe_decimal(message.get('filled_size'))
                 if order_type == "OPEN":
                     self.current_order_status = status
 
@@ -124,8 +132,9 @@ class TradingBot:
                             # Fallback (should not happen after run() starts)
                             self.order_filled_event.set()
 
-                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                    f"{message.get('size')} @ {message.get('price')}", "INFO")
+                    self.logger.log(f"[{order_type}] [{order_id}] {status} {size} @ {price}", "INFO")
+                    if order_type == "CLOSE":
+                        self._remove_trade(order_id)
                     self.logger.log_transaction(order_id, side, message.get('size'), message.get('price'), status)
                 elif status == "CANCELED":
                     if order_type == "OPEN":
@@ -138,14 +147,15 @@ class TradingBot:
                         if self.order_filled_amount > 0:
                             self.logger.log_transaction(order_id, side, self.order_filled_amount, message.get('price'), status)
 
-                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                    f"{message.get('size')} @ {message.get('price')}", "INFO")
+                    self.logger.log(f"[{order_type}] [{order_id}] {status} {size} @ {price}", "INFO")
+                    if order_type == "CLOSE":
+                        self._update_trade_quantity(order_id, size, filled_size)
                 elif status == "PARTIALLY_FILLED":
-                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                    f"{filled_size} @ {message.get('price')}", "INFO")
+                    self.logger.log(f"[{order_type}] [{order_id}] {status} {filled_size} @ {price}", "INFO")
+                    if order_type == "CLOSE":
+                        self._update_trade_quantity(order_id, size, filled_size)
                 else:
-                    self.logger.log(f"[{order_type}] [{order_id}] {status} "
-                                    f"{message.get('size')} @ {message.get('price')}", "INFO")
+                    self.logger.log(f"[{order_type}] [{order_id}] {status} {size} @ {price}", "INFO")
 
             except Exception as e:
                 self.logger.log(f"Error handling order update: {e}", "ERROR")
@@ -154,9 +164,47 @@ class TradingBot:
         # Setup order update handler
         self.exchange_client.setup_order_update_handler(order_update_handler)
 
+    @staticmethod
+    def _safe_decimal(value) -> Decimal:
+        if isinstance(value, Decimal):
+            return value
+        try:
+            if value is None:
+                return Decimal(0)
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal(0)
+
+    def _register_trade(self, order_id: Optional[str], entry_price, quantity) -> None:
+        if not order_id:
+            return
+        entry = self._safe_decimal(entry_price)
+        qty = self._safe_decimal(quantity)
+        if qty <= 0:
+            return
+        self.open_trades[order_id] = {
+            'entry_price': entry,
+            'quantity': qty
+        }
+
+    def _update_trade_quantity(self, order_id: Optional[str], order_size, filled_size) -> None:
+        if not order_id or order_id not in self.open_trades:
+            return
+        size = self._safe_decimal(order_size)
+        filled = self._safe_decimal(filled_size)
+        remaining = size - filled
+        if remaining <= 0:
+            self.open_trades.pop(order_id, None)
+        else:
+            self.open_trades[order_id]['quantity'] = remaining
+
+    def _remove_trade(self, order_id: Optional[str]) -> None:
+        if order_id and order_id in self.open_trades:
+            self.open_trades.pop(order_id, None)
+
     def _calculate_wait_time(self) -> Decimal:
         """Calculate wait time between orders."""
-        cool_down_time = self.config.wait_time
+        cool_down_time = self.current_wait_target if self.current_wait_target > 0 else self.config.wait_time
 
         if len(self.active_close_orders) < self.last_close_orders:
             self.last_close_orders = len(self.active_close_orders)
@@ -166,14 +214,21 @@ class TradingBot:
         if len(self.active_close_orders) >= self.config.max_orders:
             return 1
 
-        if len(self.active_close_orders) / self.config.max_orders >= 2/3:
-            cool_down_time = 2 * self.config.wait_time
-        elif len(self.active_close_orders) / self.config.max_orders >= 1/3:
-            cool_down_time = self.config.wait_time
-        elif len(self.active_close_orders) / self.config.max_orders >= 1/6:
-            cool_down_time = self.config.wait_time / 2
+        if self.config.max_orders > 0:
+            ratio = len(self.active_close_orders) / self.config.max_orders
         else:
-            cool_down_time = self.config.wait_time / 4
+            ratio = 0
+
+        base_wait = self.current_wait_target if self.current_wait_target > 0 else self.config.wait_time
+
+        if ratio >= 2/3:
+            cool_down_time = 2 * base_wait
+        elif ratio >= 1/3:
+            cool_down_time = base_wait
+        elif ratio >= 1/6:
+            cool_down_time = base_wait / 2
+        else:
+            cool_down_time = base_wait / 4
 
         # if the program detects active_close_orders during startup, it is necessary to consider cooldown_time
         if self.last_open_order_time == 0 and len(self.active_close_orders) > 0:
@@ -183,6 +238,115 @@ class TradingBot:
             return 0
         else:
             return 1
+
+    def _select_wait_interval(self, base_wait: Decimal) -> float:
+        if base_wait <= 0:
+            return 0.0
+
+        min_cfg = self.config.wait_time_min
+        max_cfg = self.config.wait_time_max
+
+        if min_cfg is None and max_cfg is None:
+            return float(base_wait)
+
+        low = float(min_cfg) if min_cfg is not None else float(base_wait)
+        high = float(max_cfg) if max_cfg is not None else float(base_wait)
+
+        if low > high:
+            low, high = high, low
+
+        low = max(0.0, low)
+        high = max(low, high)
+
+        if high == low:
+            return low
+
+        return random.uniform(low, high)
+
+    @staticmethod
+    def _calculate_loss_percentage(entry_price: Decimal, mark_price: Decimal, direction: str) -> Decimal:
+        if entry_price <= 0:
+            return Decimal(0)
+
+        if direction == 'buy':
+            loss = entry_price - mark_price
+        else:
+            loss = mark_price - entry_price
+
+        if loss <= 0:
+            return Decimal(0)
+
+        return (loss / entry_price) * Decimal(100)
+
+    async def _check_position_loss(self) -> bool:
+        if self.config.max_position_loss is None or self.config.max_position_loss <= 0:
+            return False
+
+        if not self.open_trades:
+            return False
+
+        total_qty = Decimal(0)
+        weighted_entry = Decimal(0)
+
+        for trade in self.open_trades.values():
+            qty = self._safe_decimal(trade.get('quantity'))
+            entry = self._safe_decimal(trade.get('entry_price'))
+            total_qty += qty
+            weighted_entry += entry * qty
+
+        if total_qty <= 0:
+            return False
+
+        avg_entry = weighted_entry / total_qty
+
+        best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+        if best_bid <= 0 or best_ask <= 0:
+            raise ValueError("No bid/ask data available")
+
+        mark_price = best_bid if self.config.direction == 'buy' else best_ask
+        loss_pct = self._calculate_loss_percentage(avg_entry, mark_price, self.config.direction)
+
+        if loss_pct >= self.config.max_position_loss:
+            await self._trigger_position_loss(total_qty, best_bid, best_ask, loss_pct)
+            return True
+
+        return False
+
+    async def _trigger_position_loss(self, total_qty: Decimal, best_bid: Decimal,
+                                     best_ask: Decimal, loss_pct: Decimal) -> None:
+        self.logger.log(
+            f"[MAX-LOSS] Position loss {loss_pct}% reached limit {self.config.max_position_loss}%", "WARNING"
+        )
+
+        for order_id in list(self.open_trades.keys()):
+            try:
+                await self.exchange_client.cancel_order(order_id)
+            except Exception as e:
+                self.logger.log(f"[MAX-LOSS] Failed to cancel order {order_id}: {e}", "ERROR")
+
+        close_side = self.config.close_order_side
+        close_price = best_bid if close_side == 'sell' else best_ask
+
+        stop_result = await self.exchange_client.place_close_order(
+            self.config.contract_id,
+            total_qty,
+            close_price,
+            close_side,
+            post_only=False
+        )
+
+        if stop_result.success:
+            self.logger.log(
+                f"[MAX-LOSS] Submitted emergency close order {stop_result.order_id} for {total_qty}",
+                "WARNING"
+            )
+        else:
+            self.logger.log(
+                f"[MAX-LOSS] Failed to submit emergency close order: {stop_result.error_message}",
+                "ERROR"
+            )
+
+        self.open_trades.clear()
 
     async def _place_and_monitor_open_order(self) -> bool:
         """Place an order and monitor its execution."""
@@ -226,6 +390,8 @@ class TradingBot:
 
         if self.order_filled_event.is_set() or order_result.status == 'FILLED':
             if self.config.aster_boost:
+                self.last_open_order_time = time.time()
+                self.current_wait_target = self._select_wait_interval(Decimal(max(self.config.wait_time, 0)))
                 close_order_result = await self.exchange_client.place_market_order(
                     self.config.contract_id,
                     self.config.quantity,
@@ -233,6 +399,7 @@ class TradingBot:
                 )
             else:
                 self.last_open_order_time = time.time()
+                self.current_wait_target = self._select_wait_interval(Decimal(max(self.config.wait_time, 0)))
                 # Place close order
                 close_side = self.config.close_order_side
                 if close_side == 'sell':
@@ -249,6 +416,9 @@ class TradingBot:
 
                 if not close_order_result.success:
                     self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
+                else:
+                    tracked_qty = close_order_result.size or self.config.quantity
+                    self._register_trade(close_order_result.order_id, filled_price, tracked_qty)
 
                 return True
 
@@ -300,9 +470,13 @@ class TradingBot:
                         close_side
                     )
                 self.last_open_order_time = time.time()
+                self.current_wait_target = self._select_wait_interval(Decimal(max(self.config.wait_time, 0)))
 
                 if not close_order_result.success:
                     self.logger.log(f"[CLOSE] Failed to place close order: {close_order_result.error_message}", "ERROR")
+                else:
+                    tracked_qty = close_order_result.size or self.order_filled_amount
+                    self._register_trade(close_order_result.order_id, filled_price, tracked_qty)
 
             return True
 
@@ -443,11 +617,16 @@ class TradingBot:
             self.logger.log(f"Direction: {self.config.direction}", "INFO")
             self.logger.log(f"Max Orders: {self.config.max_orders}", "INFO")
             self.logger.log(f"Wait Time: {self.config.wait_time}s", "INFO")
+            if self.config.wait_time_min is not None or self.config.wait_time_max is not None:
+                min_wait = self.config.wait_time_min if self.config.wait_time_min is not None else self.config.wait_time
+                max_wait = self.config.wait_time_max if self.config.wait_time_max is not None else self.config.wait_time
+                self.logger.log(f"Wait Time Range: {min_wait}s ~ {max_wait}s", "INFO")
             self.logger.log(f"Exchange: {self.config.exchange}", "INFO")
             self.logger.log(f"Grid Step: {self.config.grid_step}%", "INFO")
             self.logger.log(f"Stop Price: {self.config.stop_price}", "INFO")
             self.logger.log(f"Pause Price: {self.config.pause_price}", "INFO")
             self.logger.log(f"Aster Boost: {self.config.aster_boost}", "INFO")
+            self.logger.log(f"Max Position Loss: {self.config.max_position_loss}%", "INFO")
             self.logger.log("=============================", "INFO")
 
             # Capture the running event loop for thread-safe callbacks
@@ -486,6 +665,16 @@ class TradingBot:
                     continue
 
                 if not mismatch_detected:
+                    try:
+                        position_loss_triggered = await self._check_position_loss()
+                    except ValueError as e:
+                        self.logger.log(f"[MAX-LOSS] Price check failed: {e}", "ERROR")
+                        position_loss_triggered = False
+
+                    if position_loss_triggered:
+                        await asyncio.sleep(1)
+                        continue
+
                     wait_time = self._calculate_wait_time()
 
                     if wait_time > 0:
