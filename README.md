@@ -22,7 +22,7 @@
 
 使用我的推荐链接获得 10% 手续费返佣以及潜在未来福利
 
-#### Aster 交易所: [https://www.asterdex.com/zh-CN/referral/5191B1](https://www.asterdex.com/zh-CN/referral/5191B1)
+#### Aster 交易所: [https://www.asterdex.com/zh-CN/referral/373F77)
 
 使用我的推荐链接获得 30% 手续费返佣以及积分加成
 

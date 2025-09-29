@@ -18,7 +18,7 @@ You will get 30% fee rebates on all your trading fees
 
 You will get 10% taker fee discount rebates and potential future benefits
 
-#### Aster Exchange: [https://www.asterdex.com/zh-CN/referral/5191B1](https://www.asterdex.com/zh-CN/referral/5191B1)
+#### Aster Exchange: [https://www.asterdex.com/zh-CN/referral/373F77)
 
 You will get 10% fee rebates and potential points boost
 
